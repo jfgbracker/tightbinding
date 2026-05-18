@@ -846,6 +846,10 @@ class Lattice:
                     textposition="bottom center",
                 )
             )
+            fig.update_yaxes(
+                scaleanchor="x",
+                scaleratio=1,
+            )
 
             fig.update_layout(
                 title=dict(text=f"{self.name} Lattice"),
@@ -1007,7 +1011,7 @@ class Lattice:
             xaxis_zeroline=False,
             paper_bgcolor="white",
             plot_bgcolor="white",
-            yaxis=dict(scaleanchor="x", scaleratio=1),
+            yaxis_scaleanchor="x",
             hovermode="closest",
             showlegend=False,
             **figargs,
@@ -1143,22 +1147,24 @@ class Lattice:
             )  # FigureWidgeta permanent object that can be updated on the fly
             base_fig.update_layout(
                 title=dict(text=f"{self.name} Lattice"),
-                yaxis_zeroline=False,
-                xaxis_zeroline=False,
+                xaxis=dict(constrain="domain"),
+                yaxis_scaleanchor="x",
                 paper_bgcolor="white",
                 plot_bgcolor="white",
-                yaxis=dict(scaleanchor="x", scaleratio=1),
                 hovermode="closest",
                 width=width,
                 height=height,
                 showlegend=False,
             )
+            
+            
 
             # Update function, taking as argument the interactive objects (here sliders) and modifying the plot
             def update(**kwargs):
                 fig = (
                     base_fig  # accessing the semi-global base_fig and creating an alias
                 )
+                                
                 selection = {
                     dim: kwargs[dim] for dim in param_dims
                 }  # creating a dict of dimension,value pairs which can be updated by the sliders
@@ -1204,6 +1210,7 @@ class Lattice:
                         ].text = (
                             info  # Updating the trace data[i] (link i) hoverable text
                         )
+                        
 
             interactive_output(update, sliders)
             display(VBox([base_fig] + [HBox(list(sliders.values()))]))

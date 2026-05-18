@@ -5,7 +5,6 @@ import numpy as np
 import xarray as xr
 from typing import Union
 from copy import deepcopy
-from xarray_einstats.linalg import eigh
 from types import NoneType
 from tightbinding.geometry import Lattice, stringtoarray, arraytostring
 
@@ -601,14 +600,19 @@ class Hamiltonianbuilder:
         names of the coordinates
         """
 
-        eigva, eigve = eigh(self.Hamiltonian, dims=("i", "j"))
+        eigva, eigve = xr.apply_ufunc(
+            np.linalg.eigh,
+            self.Hamiltonian,
+            input_core_dims=[["i","j"]],
+            output_core_dims=[["j"],["i","j"]]
+        )
 
         eigva.name = "energy"
         eigve.name = "value"
         eigva = eigva.rename({"j": "band"})
         eigve = eigve.rename({"j": "band", "i": "component"})
 
-        if self.htype == complex:  # noqa: E721
+        if self.htype == np.complex128:
             eigve *= xr.apply_ufunc(np.exp, -1j * xr.apply_ufunc(np.angle, eigve)).sel(
                 {"component": 0}
             )
