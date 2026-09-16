@@ -17,7 +17,7 @@ DESCRIPTION = 'A lattice-based tight-binding Hamiltonian constructor.'
 URL = 'https://github.com/me/myproject'
 EMAIL = 'guillotmartin@yahoo.com'
 AUTHOR = 'Martin Guillot'
-REQUIRES_PYTHON = '>=3.14.0'
+REQUIRES_PYTHON = '>=3.11'
 VERSION = '0.1.0'
     
 # What packages are required for this module to be executed?
