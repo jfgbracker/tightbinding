@@ -1,3 +1,6 @@
 /.env
 /.vscode
 /tightbinding.egg-info
+# compiled bytecode should never have been tracked
+__pycache__/
+*.py[cod]
