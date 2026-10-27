@@ -14,33 +14,35 @@ from setuptools import find_packages, setup, Command
 # Package meta-data.
 NAME = 'tightbinding'
 DESCRIPTION = 'A lattice-based tight-binding Hamiltonian constructor.'
-URL = 'https://github.com/me/myproject'
+URL = 'https://github.com/MartinGuillot/tightbinding'
 EMAIL = 'guillotmartin@yahoo.com'
 AUTHOR = 'Martin Guillot'
+# 3.11 is the real floor: the code uses PEP 646 star-unpacking in subscripts
+# (np.mgrid[*(...)]) and types.NoneType.
 REQUIRES_PYTHON = '>=3.11'
 VERSION = '0.1.0'
-    
+
 # What packages are required for this module to be executed?
 REQUIRED = [
-    'xarray', 
-    'numpy', 
-    'plotly', 
-    'ipywidgets', 
-    'IPython', 
-    'hvplot', 
-    'jupyter', 
-    'xarray_einstats', 
-    'anywidget', 
-    'dask', 
-    'pyparsing', 
-    'jupyter-bokeh',
+    'numpy',
+    'xarray>=2025.1',   # topology.py uses the xarray.ufuncs namespace
+    'scipy',            # plotting.plot_density
+    'plotly',
     'matplotlib',
-    'dask'
+    'ipywidgets',
+    'ipython',
+    'hvplot',
+    'holoviews',
+    'jupyter',
+    'jupyter-bokeh',
+    'anywidget',
+    'dask',
+    'pyparsing',
 ]
 
 # What packages are optional?
 EXTRAS = {
-    # 'fancy feature': ['django'],
+    'test': ['pytest'],
 }
 
 # The rest you shouldn't have to touch too much :)
@@ -133,9 +135,12 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
         'Programming Language :: Python :: Implementation :: CPython',
-        'Programming Language :: Python :: Implementation :: PyPy'
+        'Topic :: Scientific/Engineering :: Physics',
     ],
     # $ setup.py publish support.
     cmdclass={

@@ -1,7 +1,6 @@
 import xarray as xr
 from xarray.ufuncs import angle
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 def braket(
@@ -15,9 +14,9 @@ def braket(
         dim (str, optional): dimension of the contraction. Defaults to 'component'.
 
     Returns:
-        xr.DataArray: The resulting array, with the dimension 'dim contracted.
+        xr.DataArray: The resulting array, with the dimension 'dim' contracted.
     """
-    return xr.dot(arr1.conj(), arr2, dims=dim)
+    return xr.dot(arr1.conj(), arr2, dim=dim)
 
 
 def two_smallest_indices(L: list[float]) -> tuple[int, int]:
@@ -140,6 +139,19 @@ def berry_curvature(
         The array must at least be 3D with one dimension for the eigenvector component and two dimensions for the reciprocal space.
         dims (list, optional): The reciprocal space dimensions. Defaults to ["kx","ky"].
         compdim (str, optional): Name of the eigenvector component dimension. Default to 'component'.
+        periodic (bool, optional): Whether the reciprocal grid wraps around, i.e.
+        whether it tiles the Brillouin zone torus. Defaults to False.
+
+    Note:
+        The 'periodic' flag matters for any integrated quantity. With
+        'periodic=False' the plaquettes touching the first row and column of the
+        grid are left empty, so summing the curvature misses one edge of the
+        zone and a Chern number comes out slightly below its integer value
+        (unless the grid happens to duplicate its own edge, as
+        'np.linspace(0, 1, n)' does). Sample the zone with
+        'np.linspace(0, 1, n, endpoint=False)' and pass 'periodic=True' to get
+        exact quantisation.
+
     Returns:
         xr.DataArray: The computed Berry curvature
     """

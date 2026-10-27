@@ -1,14 +1,19 @@
+"""Small xarray helpers.
+
+These wrap numpy ufuncs that xarray now exposes directly as ``xr.ufuncs.angle``
+and ``xr.ufuncs.conjugate``; they are kept so that existing notebooks importing
+them keep working.
+"""
+
 import numpy as np
 import xarray as xr
-from typing import Union
-from copy import deepcopy
-from xarray_einstats.linalg import eigh
-from types import NoneType
-from .geometry import stringtoarray, arraytostring
 
-def angle(data:xr.DataArray)->xr.DataArray:
+
+def angle(data: xr.DataArray) -> xr.DataArray:
+    """Element-wise argument of a complex DataArray."""
     return xr.apply_ufunc(np.angle, data)
 
-def conjugate(data:xr.DataArray)->xr.DataArray:
-    return xr.apply_ufunc(np.conjugate, data)
 
+def conjugate(data: xr.DataArray) -> xr.DataArray:
+    """Element-wise complex conjugate of a DataArray."""
+    return xr.apply_ufunc(np.conjugate, data)

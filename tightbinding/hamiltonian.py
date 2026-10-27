@@ -62,14 +62,37 @@ class Hopping:
             + f" displacement: {self.disp} unit cells"
         )
 
+    def site_names(self) -> tuple[str, str]:
+        """Return the site names of the two orbitals of this hopping.
+
+        Orbital references have the form '<site>_<orbital>'. The site name is
+        matched against the sites actually present in the unit cell so that
+        names containing an underscore are handled correctly.
+
+        Raises:
+            KeyError: If either reference does not name an orbital of the unit cell
+        """
+        sites = self.lattice.unitcell.sites
+
+        def resolve(reference: str) -> str:
+            for ksite, site in sites.items():
+                prefix = f"{ksite}_"
+                if reference.startswith(prefix) and reference[len(prefix):] in site.orbitals:
+                    return ksite
+            raise KeyError(
+                f"{reference!r} does not name an orbital of unit cell "
+                f"{self.lattice.unitcell.name!r}"
+            )
+
+        return resolve(self.orb1), resolve(self.orb2)
+
     def compute_std_distance(self):
         """Compute the hopping distance, assuming the lattice is regular"""
-        site1 = self.orb1.split(sep="_")[0]
-        site2 = self.orb2.split(sep="_")[0]
+        site1, site2 = self.site_names()
 
         dist = self.lattice.unitvecs.transpose() @ np.array(self.disp)
-        dist -= self.lattice.unitcell.sites[site1[0]].position
-        dist += self.lattice.unitcell.sites[site2[0]].position
+        dist = dist - self.lattice.unitcell.sites[site1].position
+        dist = dist + self.lattice.unitcell.sites[site2].position
 
         self.std_dist = dist
 
@@ -79,7 +102,9 @@ class Hopping:
         start_uc = stringtoarray(start_uc)
         disp = np.array(self.disp)
 
-        numbjumps = (start_uc + disp + self.lattice.mincoords) // self.lattice.range
+        # Must use the same origin shift as end_unit_cell, otherwise the wrap
+        # count is wrong whenever the lattice does not start at the origin.
+        numbjumps = (start_uc + disp - self.lattice.mincoords) // self.lattice.range
         distance_jumped = self.lattice.unitvecs.transpose() @ (
             self.lattice.range * numbjumps
         )
@@ -133,8 +158,7 @@ class Hopping:
             dist = self.std_dist
             return dist
         else:
-            site1 = self.orb1.split(sep="_")[0]
-            site2 = self.orb2.split(sep="_")[0]
+            site1, site2 = self.site_names()
 
             posuc1 = self.lattice.unitcells[start_uc].position
             pos1 = posuc1 + self.lattice.unitcells[start_uc].sites[site1].position
@@ -160,10 +184,65 @@ class Energy:
         """
 
         self.lattice = lattice
-        self.onsite_energies: dict[str] = {
+        self.onsite_energies: dict[str, str] = {
             orb: "0" for orb in lattice.orbitals_index
         }  # An index of each orbital's on site energy, in a symbolic expression form
         self.context = {"np": np}  # the context for condition evaluation
+
+    def matching_orbitals(
+        self,
+        norbital: Union[str, NoneType] = None,
+        nsite: Union[str, NoneType] = None,
+        nunitcell: Union[str, NoneType] = None,
+        condition: str = "True",
+    ) -> list[str]:
+        """List the orbital keys selected by a name specification.
+
+        Any of 'norbital', 'nsite' and 'nunitcell' that is None acts as a
+        wildcard, so passing none of them selects every orbital of the lattice.
+        'condition' is evaluated once per site with 'position' (cartesian) and
+        'index' (unit cell index) in scope.
+
+        Args:
+            norbital (str, optional): Name of the orbital. Defaults to None.
+            nsite (str, optional): Name of the site. Defaults to None.
+            nunitcell (str, optional): Name of the unit cell. Defaults to None.
+            condition (str, optional): An additional condition on the unit cell
+            index or the site position, given as an expression string.
+            Defaults to "True".
+
+        Returns:
+            list[str]: The selected entries of the lattice orbital index
+        """
+        if nunitcell is not None:
+            unitcells = {nunitcell: self.lattice.unitcells[nunitcell]}
+        else:
+            unitcells = self.lattice.unitcells
+
+        selected = []
+        for name_uc, uc in unitcells.items():
+            index = stringtoarray(name_uc)
+            if nsite is not None:
+                if nsite not in uc.sites:
+                    continue
+                sites = {nsite: uc.sites[nsite]}
+            else:
+                sites = uc.sites
+
+            for name_site, site in sites.items():
+                position = uc.position + site.position
+                self.context.update({"position": position, "index": index})
+                if not eval(condition, {"__builtins__": {}}, self.context):
+                    continue
+
+                if norbital is not None:
+                    if norbital in site.orbitals:
+                        selected.append(f"{name_uc}_{name_site}_{norbital}")
+                else:
+                    for name_orb in site.orbitals:
+                        selected.append(f"{name_uc}_{name_site}_{name_orb}")
+
+        return selected
 
     def set_energy(
         self,
@@ -174,83 +253,23 @@ class Energy:
         condition: str = "True",
     ):
         """Set the on-site energy of specific orbitals of the Hamiltonian. All orbitals fitting the name
-        specification (of orbital, site and unit cell) are affected.
+        specification (of orbital, site and unit cell) are affected. Passing no name
+        specification at all affects every orbital of the lattice.
 
         Args:
             expr (str): The on-site energy as a function of the parameters included in the Hamiltonian.
 
-            norbital (Union[str, NoneType], optional): Name of the orbital. Defaults to None.
+            norbital (str, optional): Name of the orbital. Defaults to None.
 
-            nsite (Union[str, NoneType], optional): Name of the site. Defaults to None.
+            nsite (str, optional): Name of the site. Defaults to None.
 
-            nunitcell (Union[str, NoneType], optional): Name of the unit cell. Defaults to None.
+            nunitcell (str, optional): Name of the unit cell. Defaults to None.
 
-            condition (str, optional): A additional condition, either on the unit cell index or the
-            site position, must be given as an expression string. Defaults to True.
+            condition (str, optional): An additional condition, either on the unit cell index or the
+            site position, must be given as an expression string. Defaults to "True".
         """
-
-        if not nunitcell:
-            for name_uc, uc in self.lattice.unitcells.items():
-                index = stringtoarray(name_uc)
-                if not nsite:
-                    for name_site, site in uc.sites.items():
-                        position = uc.position + site.position
-                        self.context.update({"position": position, "index": index})
-                        if eval(condition, {"__builtins__": {}}, self.context):
-                            if norbital:
-                                self.onsite_energies.update(
-                                    {f"{name_uc}_{name_site}_{norbital}": expr}
-                                )
-                            else:
-                                for name_orb in site.orbitals:
-                                    self.onsite_energies.update(
-                                        {f"{name_uc}_{nsite}_{name_orb}": expr}
-                                    )
-                else:
-                    site = uc.sites[nsite]
-                    position = uc.position + site.position
-                    self.context.update({"position": position, "index": index})
-                    if eval(condition, {"__builtins__": {}}, self.context):
-                        if norbital:
-                            self.onsite_energies.update(
-                                {f"{name_uc}_{nsite}_{norbital}": expr}
-                            )
-                        else:
-                            for name_orb, orb in site.orbitals.items():
-                                self.onsite_energies.update(
-                                    {f"{name_uc}_{nsite}_{name_orb}": expr}
-                                )
-        else:
-            uc = self.lattice.unitcells[nunitcell]
-            index = stringtoarray(nunitcell)
-            if not nsite:
-                for name_site, site in uc.sites.items():
-                    position = uc.position + site.position
-                    self.context.update({"position": position, "index": index})
-                    if eval(condition, {"__builtins__": {}}, self.context):
-                        if norbital:
-                            self.onsite_energies.update(
-                                {f"{nunitcell}_{name_site}_{norbital}": expr}
-                            )
-                        else:
-                            for name_orb, orb in site.orbitals.items():
-                                self.onsite_energies.update(
-                                    {f"{nunitcell}_{name_site}_{name_orb}": expr}
-                                )
-            else:
-                site = uc.sites[nsite]
-                position = uc.position + site.position
-                self.context.update({"position": position, "index": index})
-                if eval(condition, {"__builtins__": {}}, self.context):
-                    if norbital:
-                        self.onsite_energies.update(
-                            {f"{nunitcell}_{nsite}_{norbital}": expr}
-                        )
-                    else:
-                        for name_orb, orb in site.orbitals.items():
-                            self.onsite_energies.update(
-                                {f"{nunitcell}_{nsite}_{name_orb}": expr}
-                            )
+        for key in self.matching_orbitals(norbital, nsite, nunitcell, condition):
+            self.onsite_energies[key] = expr
 
     def add_energy(
         self,
@@ -260,86 +279,26 @@ class Energy:
         nunitcell: Union[str, NoneType] = None,
         condition: str = "True",
     ):
-        """An the on-site energy "expr to the existing expression, for specific orbitals of the Hamiltonian. All orbitals fitting the name
-        specification (of orbital, site and unit cell) are affected.
+        """Add the on-site energy 'expr' to the existing expression, for specific orbitals of the
+        Hamiltonian. All orbitals fitting the name specification (of orbital, site and unit cell)
+        are affected. Passing no name specification at all affects every orbital of the lattice.
 
         Args:
             expr (str): The on-site energy increment as a function of the parameters included in the Hamiltonian.
 
-            norbital (Union[str, NoneType], optional): Name of the orbital. Defaults to None.
+            norbital (str, optional): Name of the orbital. Defaults to None.
 
-            nsite (Union[str, NoneType], optional): Name of the site. Defaults to None.
+            nsite (str, optional): Name of the site. Defaults to None.
 
-            nunitcell (Union[str, NoneType], optional): Name of the unit cell. Defaults to None.
+            nunitcell (str, optional): Name of the unit cell. Defaults to None.
 
-            condition (str, optional): A additional condition, either on the unit cell index or the
-            site position, must be given as an expression string. Defaults to True.
-
-        Raises:
-            ValueError: If all key entries are None
+            condition (str, optional): An additional condition, either on the unit cell index or the
+            site position, must be given as an expression string. Defaults to "True".
         """
-        if not nunitcell:
-            for name_uc, uc in self.lattice.unitcells.items():
-                index = stringtoarray(name_uc)
-                if not nsite:
-                    for name_site, site in uc.sites.items():
-                        position = uc.position + site.position
-                        self.context.update({"position": position, "index": index})
-                        if eval(condition, {"__builtins__": {}}, self.context):
-                            if norbital:
-                                self.onsite_energies[
-                                    f"{name_uc}_{name_site}_{norbital}"
-                                ] += "+" + expr
-                            else:
-                                raise ValueError(
-                                    "At least one of nunitcell, nsite and norbital must be given"
-                                )
-
-                else:
-                    site = uc.sites[nsite]
-                    position = uc.position + site.position
-                    self.context.update({"position": position, "index": index})
-                    if eval(condition, {"__builtins__": {}}, self.context):
-                        if norbital:
-                            self.onsite_energies[f"{name_uc}_{nsite}_{norbital}"] += (
-                                "+" + expr
-                            )
-                        else:
-                            for name_orb, orb in site.orbitals.items():
-                                self.onsite_energies[
-                                    f"{name_uc}_{nsite}_{name_orb}"
-                                ] += "+" + expr
-        else:
-            uc = self.lattice.unitcells[nunitcell]
-            index = stringtoarray(nunitcell)
-            if not nsite:
-                for name_site, site in uc.sites.items():
-                    position = uc.position + site.position
-                    self.context.update({"position": position, "index": index})
-                    if eval(condition, {"__builtins__": {}}, self.context):
-                        if norbital:
-                            self.onsite_energies[
-                                f"{nunitcell}_{name_site}_{norbital}"
-                            ] += "+" + expr
-                        else:
-                            for name_orb, orb in site.orbitals.items():
-                                self.onsite_energies[
-                                    f"{nunitcell}_{name_site}_{name_orb}"
-                                ] += "+" + expr
-            else:
-                site = uc.sites[nsite]
-                position = uc.position + site.position
-                self.context.update({"position": position, "index": index})
-                if eval(condition, {"__builtins__": {}}, self.context):
-                    if norbital:
-                        self.onsite_energies[f"{nunitcell}_{nsite}_{norbital}"] += (
-                            "+" + expr
-                        )
-                    else:
-                        for name_orb, orb in site.orbitals.items():
-                            self.onsite_energies[
-                                f"{nunitcell}_{name_site}_{name_orb}"
-                            ] += "+" + expr
+        for key in self.matching_orbitals(norbital, nsite, nunitcell, condition):
+            # Parenthesised so that an increment such as "a if b else c" cannot
+            # rebind against the existing expression.
+            self.onsite_energies[key] = f"({self.onsite_energies[key]})+({expr})"
 
 
 class Hamiltonianbuilder:
@@ -378,10 +337,12 @@ class Hamiltonianbuilder:
         self.lattice = lattice
         self.matdim = lattice.num_orbitals()
         self.couplings: list[Hopping] = []
-        self.onsite_energies: dict[str] = {}
+        self.onsite_energies: dict[str, str] = {}
         self.parameters.update(
             {"i": np.arange(self.matdim), "j": np.arange(self.matdim)}
         )
+        # name -> (dims, values), replayed by create_array on every rebuild
+        self.multidim_coords: dict[str, tuple[tuple[str, ...], np.ndarray]] = {}
         self.context = {}
         self.create_array()
 
@@ -401,31 +362,41 @@ class Hamiltonianbuilder:
         self.htype = float
 
     def create_array(self):
-        """Build the xarray representing the Hamiltonian"""
+        """Build the (empty) xarray representing the Hamiltonian.
 
-        self.size = tuple(
-            (
-                len(coord)
-                for coord in self.parameters.values()
-                if check_valid_coord(coord)
-            )
-        )
+        Any multidimensional coordinate registered with
+        :meth:`add_multidimensional_coord` is re-attached, so that rebuilding
+        does not silently drop the reciprocal-space coordinates.
+        """
+
+        # "i" and "j" are always the last two dimensions, whatever order the
+        # parameters were supplied or added in.
+        dims = [
+            (dim, coord)
+            for dim, coord in self.parameters.items()
+            if check_valid_coord(coord) and dim not in ("i", "j")
+        ]
+        dims += [(dim, self.parameters[dim]) for dim in ("i", "j")]
+
+        self.size = tuple(len(coord) for _, coord in dims)
         self.Hamiltonian = xr.DataArray(
-            np.zeros(self.size, dtype=self.htype),
-            coords=[
-                (dim, coord)
-                for dim, coord in self.parameters.items()
-                if check_valid_coord(coord)
-            ],
+            np.zeros(self.size, dtype=self.htype), coords=dims
         )
 
         self.Hamiltonian.name = "Hamiltonian"
 
+        for name, (coord_dims, values) in self.multidim_coords.items():
+            self.Hamiltonian = self.Hamiltonian.assign_coords(
+                {name: (coord_dims, values)}
+            )
+
+        self.context.update(
+            {name: self.Hamiltonian.coords[name] for name, _ in dims}
+        )
         self.context.update(
             {
                 name: self.Hamiltonian.coords[name]
-                for name, coord in self.parameters.items()
-                if check_valid_coord(coord)
+                for name in self.multidim_coords
             }
         )
         self.context.update(
@@ -455,7 +426,9 @@ class Hamiltonianbuilder:
             coord (np.ndarray): The array containing the coordinate points.
             dims (tuple[str]): The dimensions on which depends this new multidimensional coordinate.
         """
-        self.Hamiltonian = self.Hamiltonian.assign_coords({name: (dims, coord)})
+        coord = np.asarray(coord)
+        self.multidim_coords[name] = (tuple(dims), coord)
+        self.Hamiltonian = self.Hamiltonian.assign_coords({name: (tuple(dims), coord)})
 
         self.context[name] = self.Hamiltonian.coords[name]
 
@@ -498,8 +471,6 @@ class Hamiltonianbuilder:
         if exist and allowed:
             distance = coupling.compute_distance(start_uc)
             self.context["distance"] = distance
-            if self.periodicedges == 0:
-                phase = 1
             if self.periodicedges > 0:
                 dotp = eval(
                     f"distance[0] * {self.recoords[0]}",
@@ -516,10 +487,16 @@ class Hamiltonianbuilder:
             else:
                 phase = 1
 
+            # The angular profile of the orbitals is only defined in 2D; in any
+            # other dimension the hopping is taken to be isotropic.
+            angledependance = 1
             if self.lattice.dimension == 2:
-                nsite1, norb1 = orb1.split("_")
-                nsite2, norb2 = orb2.split("_")
+                nsite1, nsite2 = coupling.site_names()
+                norb1 = orb1[len(nsite1) + 1:]
+                norb2 = orb2[len(nsite2) + 1:]
                 theta = np.angle(distance[0] + 1j * distance[1])
+                # The destination orbital lives in the end unit cell, which is
+                # not the starting one whenever the hopping crosses a cell.
                 dep1 = (
                     self.lattice.unitcells[start_uc]
                     .sites[nsite1]
@@ -527,7 +504,7 @@ class Hamiltonianbuilder:
                     .angledep
                 )
                 dep2 = (
-                    self.lattice.unitcells[start_uc]
+                    self.lattice.unitcells[end_uc]
                     .sites[nsite2]
                     .orbitals[norb2]
                     .angledep
@@ -595,16 +572,44 @@ class Hamiltonianbuilder:
             dim=["k"],
         )
 
+    @staticmethod
+    def gauge_factor(eigve: xr.DataArray) -> xr.DataArray:
+        """Return the factor that fixes the eigenvector gauge on component 0.
+
+        Multiplying an eigenvector map by this factor makes its first component
+        real and non-negative, which removes the arbitrary phase (or sign, for a
+        real Hamiltonian) returned by the solver.
+
+        Note that this convention is degenerate wherever the first component is
+        close to zero: for such lattices the resulting phase is dominated by
+        numerical noise.
+
+        Args:
+            eigve (xr.DataArray): An eigenvector map with a 'component' dimension
+
+        Returns:
+            xr.DataArray: The gauge factor, broadcastable against 'eigve'
+        """
+        reference = eigve.isel(component=0)
+        if np.iscomplexobj(eigve):
+            return xr.apply_ufunc(np.exp, -1j * xr.apply_ufunc(np.angle, reference))
+        return xr.apply_ufunc(np.sign, reference)
+
     def eigh(self):
         """A custom eigenvalue solver that redefines properly the
         names of the coordinates
+
+        Returns:
+            tuple[xr.DataArray, xr.DataArray]: The eigenvalues, with a 'band'
+            dimension, and the eigenvectors, with 'band' and 'component'
+            dimensions.
         """
 
         eigva, eigve = xr.apply_ufunc(
             np.linalg.eigh,
             self.Hamiltonian,
-            input_core_dims=[["i","j"]],
-            output_core_dims=[["j"],["i","j"]]
+            input_core_dims=[["i", "j"]],
+            output_core_dims=[["j"], ["i", "j"]],
         )
 
         eigva.name = "energy"
@@ -612,17 +617,14 @@ class Hamiltonianbuilder:
         eigva = eigva.rename({"j": "band"})
         eigve = eigve.rename({"j": "band", "i": "component"})
 
-        if self.htype == np.complex128:
-            eigve *= xr.apply_ufunc(np.exp, -1j * xr.apply_ufunc(np.angle, eigve)).sel(
-                {"component": 0}
-            )
-        else:
-            eigve *= xr.apply_ufunc(np.sign, eigve).sel({"component": 0})
+        eigve = eigve * self.gauge_factor(eigve)
 
         return eigva, eigve
 
     def plot_coupling(self):
-        self.lattice.plot_couplings(self.Hamiltonian)
+        """Plot every coupling term of the built Hamiltonian. See
+        :meth:`tightbinding.geometry.Lattice.plot_couplings`."""
+        return self.lattice.plot_couplings(self.Hamiltonian)
 
     def plot_onsite_energy(self, orbital: str):
         """Plot the on-site energies of a lattice.
@@ -634,7 +636,7 @@ class Hamiltonianbuilder:
         Onsites = self.Hamiltonian.isel(i=slicer, j=slicer)
         Onsites = Onsites.drop_vars(["i", "j"], errors="ignore")
         Onsites = Onsites.assign_coords(dict(component=slicer))
-        self.lattice.plot_field(Onsites.real, orbital=orbital, vtype="real")
+        return self.lattice.plot_field(Onsites.real, orbital=orbital, vtype="real")
 
     def eigh_parallel(self):
         """Parallelized version of the eigenvector solver, only useful for large parameter space, devours your cpu."""
@@ -654,6 +656,11 @@ class Hamiltonianbuilder:
 
         Hamil = self.Hamiltonian.chunk(chunkslen, lock=True)
 
+        # Eigenvalues of a Hermitian matrix are always real; the eigenvectors
+        # follow the dtype of the Hamiltonian, so a real Hamiltonian must not
+        # be promoted to complex here.
+        vector_dtype = self.Hamiltonian.dtype
+
         eigva, eigve = xr.apply_ufunc(
             _eigh_numpy,
             Hamil,
@@ -662,7 +669,7 @@ class Hamiltonianbuilder:
             dask_gufunc_kwargs={"output_sizes": {"i": lendims["i"], "j": lendims["j"]}},
             vectorize=True,  # allows broadcasting over outer dims
             dask="parallelized",  # enables dask-based parallelism
-            output_dtypes=[float, complex],  # specify dtype explicitly
+            output_dtypes=[np.float64, vector_dtype],
         )
 
         eigva = eigva.compute()
@@ -673,9 +680,7 @@ class Hamiltonianbuilder:
         eigva = eigva.rename({"i": "band"})
         eigve = eigve.rename({"i": "band", "j": "component"})
 
-        eigve *= xr.apply_ufunc(np.exp, -1j * xr.apply_ufunc(np.angle, eigve)).sel(
-            {"component": 0}
-        )
+        eigve = eigve * self.gauge_factor(eigve)
 
         return eigva, eigve
 
@@ -704,8 +709,10 @@ if __name__ == "__main__":
 
     ## Construct the Hamiltonian
 
-    a1s = np.array([3**0.5, -1]) * 2 * np.pi / 3 / a
-    a2s = np.array([3**0.5, 1]) * 2 * np.pi / 3 / a
+    # Always take the reciprocal basis from the unit cell: deriving it by hand
+    # is easy to get wrong, and a wrong basis silently samples something that
+    # is not the Brillouin zone.
+    a1s, a2s = honey_uc.reciprocal_vectors()
 
     kl = 2
     ka1s = np.linspace(0, 1, 100)

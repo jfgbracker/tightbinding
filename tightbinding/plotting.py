@@ -11,6 +11,23 @@ from scipy.stats import gaussian_kde
 import holoviews as hv
 import hvplot.xarray
 
+from tightbinding.geometry import make_sliders
+
+
+def configure_notebook_renderer(renderer: str = "notebook_connected"):
+    """Set the default plotly renderer for the current session.
+
+    Importing this package no longer changes plotly's global configuration on
+    its own, since a library should not reconfigure its host. Call this once at
+    the top of a notebook if figures do not display.
+
+    Args:
+        renderer (str): A plotly renderer name. Defaults to "notebook_connected".
+    """
+    import plotly.io as pio
+
+    pio.renderers.default = renderer
+
 
 def plot_density(eigva: xr.DataArray, kernel_size: float = 0.1):
     """A custom function plotting the density of states of a given hamiltonian.
@@ -21,26 +38,7 @@ def plot_density(eigva: xr.DataArray, kernel_size: float = 0.1):
     """
 
     slider_dims = [dim for dim in eigva.dims if dim != "band"]
-    sliders = {}
-    for dim in slider_dims:
-        coord = eigva.coords[dim].values
-        val = coord[0]  # start left
-        if np.issubdtype(coord.dtype, np.floating):
-            sliders[dim] = FloatSlider(
-                min=float(coord[0]),
-                max=float(coord[-1]),
-                step=float((coord[-1] - coord[0]) / max(100, len(coord))),
-                value=float(val),
-                description=dim,
-            )
-        else:
-            sliders[dim] = IntSlider(
-                min=0,
-                max=len(coord) - 1,
-                step=1,
-                value=len(coord) // 2,
-                description=dim,
-            )
+    sliders = make_sliders(eigva, exclude=["band"], start="left")
 
     slider_selection = {dim: sliders[dim].value for dim in slider_dims}
     values = eigva.sel(slider_selection, method="nearest").values
@@ -83,10 +81,12 @@ def plot_density(eigva: xr.DataArray, kernel_size: float = 0.1):
         with densitylocal.batch_update():
             densitylocal.data[0].y = y
 
-    out = interactive_output(update, sliders)
+    interactive_output(update, sliders)
 
     # Display the controls + figure together
-    display(VBox(list(sliders.values()) + [density]))
+    layout_box = VBox(list(sliders.values()) + [density])
+    display(layout_box)
+    return layout_box
 
 
 def plot_bands(bands: xr.DataArray, x: str) -> hv.DynamicMap:
@@ -111,26 +111,7 @@ def plot_bands_3D(bands: xr.DataArray, dims=["kx", "ky"], escale=0.5):
     """
 
     slider_dims = [dim for dim in bands.dims if dim not in dims and dim != "band"]
-    sliders = {}
-    for dim in slider_dims:
-        coord = bands.coords[dim].values
-        val = coord[0]  # start left
-        if np.issubdtype(coord.dtype, np.floating):
-            sliders[dim] = FloatSlider(
-                min=float(coord[0]),
-                max=float(coord[-1]),
-                step=float((coord[-1] - coord[0]) / max(100, len(coord))),
-                value=float(val),
-                description=dim,
-            )
-        else:
-            sliders[dim] = IntSlider(
-                min=0,
-                max=len(coord) - 1,
-                step=1,
-                value=len(coord) // 2,
-                description=dim,
-            )
+    sliders = make_sliders(bands, exclude=[*dims, "band"], start="left")
 
     initial_selection = {dim: sliders[dim].value for dim in slider_dims}
     traces = []
@@ -188,6 +169,7 @@ def plot_bands_3D(bands: xr.DataArray, dims=["kx", "ky"], escale=0.5):
 
     layout_box = VBox([main_widget, HBox([slider for slider in sliders.values()])])
     display(layout_box)
+    return layout_box
 
 
 def plot_band_cuts(
@@ -196,26 +178,7 @@ def plot_band_cuts(
     """A custom function to plot the bands along a cut specified by two range sliders"""
 
     slider_dims = [dim for dim in bands.dims if dim not in dims and dim != "band"]
-    sliders = {}
-    for dim in slider_dims:
-        coord = bands.coords[dim].values
-        val = coord[0]  # start left
-        if np.issubdtype(coord.dtype, np.floating):
-            sliders[dim] = FloatSlider(
-                min=float(coord[0]),
-                max=float(coord[-1]),
-                step=float((coord[-1] - coord[0]) / max(100, len(coord))),
-                value=float(val),
-                description=dim,
-            )
-        else:
-            sliders[dim] = IntSlider(
-                min=0,
-                max=len(coord) - 1,
-                step=1,
-                value=len(coord) // 2,
-                description=dim,
-            )
+    sliders = make_sliders(bands, exclude=[*dims, "band"], start="left")
 
     rangesliders = {}
     for i, dim in enumerate(dims):
@@ -369,38 +332,52 @@ def plot_band_cuts(
     )
 
     display(layout_box)
+    return layout_box
 
 
 def plot_eigenvectors(
     plots: list[list[xr.DataArray]],
     templates: list[list[Union[str, dict]]],
     titles: list[list[str]],
-    eigvas: list[list[Union[NoneType, xr.DataArray]]] = [[None]],
-    dims: list[str] = ["kx", "ky"],
-    excluded_dims: list[str] = [],
+    eigvas: Union[list[list[Union[NoneType, xr.DataArray]]], NoneType] = None,
+    dims: Union[list[str], NoneType] = None,
+    excluded_dims: Union[list[str], NoneType] = None,
 ):
     """A general plotting function for exploring eigenvector maps. All data maps passed are rendered as a grid of plot,
-    and all dimensions not in 'dims' are used as sliders controling all plots at the same time.
+    and all dimensions not in 'dims' are used as sliders controlling all plots at the same time.
 
     Args:
         plots (list[list[xr.DataArray]]): A list of list containing the various data to plot
         templates (list[list[Union[str,dict]]]): List of list of templates for the plotting style. Can either be a string 'phase', 'amplitude', 'symmetric',
         or a dictionary for additional control.
         titles (list[list[str]]): List of list of each subplot title.
-        eigvas (list[list[Union[NoneType,xr.DataArray]]], optional): List of list of eventual band structures to overlay with the eigenvectors, can also be None for no overlay. Defaults to [[None]].
+        eigvas (list[list[Union[NoneType,xr.DataArray]]], optional): List of list of eventual band structures to overlay with the eigenvectors, can also be None for no overlay. Defaults to no overlay anywhere.
         dims (list[str], optional): The dimensions of the heatmaps. Defaults to ["kx","ky"].
+        excluded_dims (list[str], optional): Dimensions that must not become sliders. Defaults to none.
+
+    Returns:
+        ipywidgets.VBox: The displayed grid of plots and its sliders.
     """
+    dims = ["kx", "ky"] if dims is None else dims
+    excluded_dims = [] if excluded_dims is None else excluded_dims
+
     n_rows = len(plots)
     n_cols = len(plots[0])
-    if len(templates) != n_rows or len(eigvas) != n_rows:
-        raise ValueError("different shapes for plots and templates")
-    if len(templates[0]) != n_cols or len(eigvas[0]) != n_cols:
-        raise ValueError("different shapes for plots and templates")
-    for i in range(1, n_rows):
+
+    if eigvas is None:
+        eigvas = [[None] * n_cols for _ in range(n_rows)]
+
+    if len(templates) != n_rows or len(titles) != n_rows or len(eigvas) != n_rows:
+        raise ValueError(
+            "'templates', 'titles' and 'eigvas' must have as many rows as 'plots'"
+        )
+    for i in range(n_rows):
         if len(plots[i]) != n_cols:
             raise ValueError(f"Length of row {i} of 'plots' not consistent")
         if len(templates[i]) != n_cols:
             raise ValueError(f"Length of row {i} of 'templates' not consistent")
+        if len(titles[i]) != n_cols:
+            raise ValueError(f"Length of row {i} of 'titles' not consistent")
         if len(eigvas[i]) != n_cols:
             raise ValueError(f"Length of row {i} of 'eigvas' not consistent")
 
@@ -409,29 +386,7 @@ def plot_eigenvectors(
         eigva: Union[NoneType, xr.DataArray],
         template: Union[str, dict],
     ) -> tuple[dict, list[float], dict, go.Heatmap]:
-        slider_dims = [
-            dim for dim in tp.dims if dim not in dims and dim not in excluded_dims
-        ]
-        sliders = {}
-        for dim in slider_dims:
-            coord = tp.coords[dim].values
-            val = coord[len(coord) // 2]  # start in the middle
-            if np.issubdtype(coord.dtype, np.floating):
-                sliders[dim] = FloatSlider(
-                    min=float(coord[0]),
-                    max=float(coord[-1]),
-                    step=float((coord[-1] - coord[0]) / max(100, len(coord))),
-                    value=float(val),
-                    description=dim,
-                )
-            else:
-                sliders[dim] = IntSlider(
-                    min=coord[0],
-                    max=coord[-1],
-                    step=1,
-                    value=len(coord) // 2,
-                    description=dim,
-                )
+        sliders = make_sliders(tp, exclude=[*dims, *excluded_dims])
 
         initial_sel = {dim: slider.value for dim, slider in sliders.items()}
         values = tp.sel(initial_sel, method="nearest").T
@@ -552,6 +507,7 @@ def plot_eigenvectors(
 
     sliders = {}
     annotations = []
+    resolved_templates = {}
     for i in range(n_rows):
         for j in range(n_cols):
             tp = plots[i][j]
@@ -600,6 +556,7 @@ def plot_eigenvectors(
             )
 
             sliders.update(slider)
+            resolved_templates[(i, j)] = template
 
     main_fig.update_layout(
         yaxis_zeroline=False,
@@ -649,13 +606,15 @@ def plot_eigenvectors(
                 eigva = eigvas[i][j]
                 values, band_values = update_single(tp, eigva, kwargs)
 
-                if template == "amplitude - saturated":
+                # Each subplot must be saturated with its own template.
+                subplot_template = templates[i][j]
+                if subplot_template == "amplitude - saturated":
                     med = float(np.mean(abs(values)))
-                    values = xr.where(values > med, med, values)
-                elif template == "symmetric - saturated":
+                    values = np.where(values > med, med, values)
+                elif subplot_template == "symmetric - saturated":
                     med = float(np.mean(abs(values)))
-                    values = xr.where(values > med, med, values)
-                    values = xr.where(values < -med, -med, values)
+                    values = np.where(values > med, med, values)
+                    values = np.where(values < -med, -med, values)
 
                 values_list += [values]
                 bands_list += [band_values]
@@ -666,7 +625,6 @@ def plot_eigenvectors(
                 widg.data[2 * i + 1].z = band_values
 
     interactive_output(update, sliders)
-
-    interactive_output(update, sliders)
     layout_box = VBox([main_widget, HBox([slider for slider in sliders.values()])])
     display(layout_box)
+    return layout_box

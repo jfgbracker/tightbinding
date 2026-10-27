@@ -1,6 +1,20 @@
 /.env
 /.vscode
 /tightbinding.egg-info
-# compiled bytecode should never have been tracked
+
+# Python build/bytecode artefacts
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test and tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/

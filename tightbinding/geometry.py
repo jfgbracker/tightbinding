@@ -2,14 +2,47 @@ import xarray as xr
 from copy import deepcopy
 import numpy as np
 import plotly.graph_objects as go
-import plotly.io as pio
 from types import NoneType
 from typing import Union
 from ipywidgets import FloatSlider, IntSlider, HBox, VBox, interactive_output
 import inspect
 from IPython.display import display
 
-pio.renderers.default = "notebook_connected"
+
+def make_sliders(
+    data: xr.DataArray, exclude: Union[list[str], tuple[str, ...]] = (), start: str = "middle"
+) -> dict:
+    """Build one ipywidget slider per dimension of 'data' that is not excluded.
+
+    Args:
+        data (xr.DataArray): The array whose dimensions become sliders.
+        exclude (list[str]): Dimension names that must not become sliders.
+        start (str): Either 'middle' or 'left', the initial slider position.
+
+    Returns:
+        dict: A mapping of dimension name to slider widget.
+    """
+    sliders = {}
+    for dim in [d for d in data.dims if d not in exclude]:
+        coord = data.coords[dim].values
+        index = 0 if start == "left" else len(coord) // 2
+        if np.issubdtype(coord.dtype, np.floating):
+            sliders[dim] = FloatSlider(
+                min=float(coord[0]),
+                max=float(coord[-1]),
+                step=float((coord[-1] - coord[0]) / max(100, len(coord))),
+                value=float(coord[index]),
+                description=dim,
+            )
+        else:
+            sliders[dim] = IntSlider(
+                min=int(coord[0]),
+                max=int(coord[-1]),
+                step=1,
+                value=int(coord[index]),
+                description=dim,
+            )
+    return sliders
 
 
 def stringtoarray(name: str) -> np.ndarray:
@@ -89,7 +122,7 @@ class Site:
         self,
         name: str,
         position: Union[list[float], np.ndarray],
-        orb: Union[list[Orbital], Orbital] = [],
+        orb: Union[list[Orbital], Orbital, NoneType] = None,
     ):
         """Initialize an empty Site at 'position' in the unit cell
         Args:
@@ -98,12 +131,12 @@ class Site:
             position (np.ndarray):
                 the position of the site inside its unit cell, must be given in cartesian coordinates (x,y,z,...)
             orb (Orbital or List[Orbital]):
-                The orbital to be added, a list of orbitals can also be passed on, can be added latter.. Default to []
+                The orbital to be added, a list of orbitals can also be passed on, can be added later. Defaults to None
         """
         self.name = name
-        self.position = np.array(position)
-        self.orbitals: dict[Orbital] = dict()
-        self.add_orbital(orb)
+        self.position = np.array(position, dtype=float)
+        self.orbitals: dict[str, Orbital] = dict()
+        self.add_orbital([] if orb is None else orb)
 
     def __repr__(self):
         return (
@@ -248,8 +281,23 @@ class Unitcell:
             numb += len(site.orbitals)
         return numb
 
+    def reciprocal_vectors(self) -> np.ndarray:
+        """Return the reciprocal lattice vectors of the unit cell.
+
+        The returned array 'B' satisfies 'a_i . b_j = 2 pi delta_ij', i.e.
+        'B = 2 pi inv(A).T' where the rows of 'A' are the unit vectors. Use
+        these when converting fractional Brillouin-zone coordinates into the
+        cartesian 'kx', 'ky', ... values expected by a periodic Hamiltonian:
+        deriving them by hand is the most common source of wrongly sampled
+        Brillouin zones.
+
+        Returns:
+            np.ndarray: A (n,n) array whose rows are the reciprocal vectors.
+        """
+        return 2 * np.pi * np.linalg.inv(np.asarray(self.unitvecs, dtype=float)).T
+
     def define_index(self):
-        """Creates an index dictionnay, linking each orbital of
+        """Creates an index dictionary, linking each orbital of
         each site of the unit cell to an integer value.
         """
         self.orbitals_index = dict()
@@ -327,18 +375,21 @@ class Unitcell:
 
             fig = go.Figure()
 
+            # The unit cell outline also sets the axis ranges, so it is always
+            # computed even when it is not drawn.
+            ctr = (self.unitvecs[0] + self.unitvecs[1]) / 2
+            ucpoly = np.array(
+                [
+                    np.zeros(2) - ctr,
+                    self.unitvecs[0] - ctr,
+                    self.unitvecs[0] + self.unitvecs[1] - ctr,
+                    self.unitvecs[1] - ctr,
+                    np.zeros(2) - ctr,
+                ]
+            )
+
             # Add unit cell shape
             if visible_uc:
-                ctr = (self.unitvecs[0] + self.unitvecs[1]) / 2
-                ucpoly = np.array(
-                    [
-                        np.zeros(2) - ctr,
-                        self.unitvecs[0] - ctr,
-                        self.unitvecs[0] + self.unitvecs[1] - ctr,
-                        self.unitvecs[1] - ctr,
-                        np.zeros(2) - ctr,
-                    ]
-                )
                 fig.add_trace(
                     go.Scatter(
                         x=ucpoly[:, 0],
@@ -452,21 +503,35 @@ class Lattice:
         self,
         name: str,
         unitcell: Unitcell,
-        periodicity: tuple[bool] = (False, False, False),
+        periodicity: Union[tuple[bool, ...], NoneType] = None,
     ):
         """Initialize a simple lattice, made of a single type of unit cell
         Args:
             name (str): The name of the lattice
             unitcell (Unitcell): The unit cell of the lattice
+            periodicity (tuple[bool] or None): Whether each lattice direction has
+            periodic boundaries. Must have one entry per lattice dimension.
+            Defaults to open boundaries in every direction.
+
+        Raises:
+            ValueError: If 'periodicity' does not have one entry per dimension
         """
         self.name = name
         self.unitcell = unitcell  # The unit cell of the lattice
         self.unitvecs = unitcell.unitvecs
-        self.unitcells: dict[Unitcell] = (
+        self.unitcells: dict[str, Unitcell] = (
             dict()
-        )  # A dictionnary that will contain all unit cells present
+        )  # A dictionary that will contain all unit cells present
         self.dimension = unitcell.dimension
-        self.periodicity = periodicity
+
+        if periodicity is None:
+            periodicity = (False,) * self.dimension
+        elif len(periodicity) != self.dimension:
+            raise ValueError(
+                f"'periodicity' has {len(periodicity)} entries but the unit cell "
+                f"is {self.dimension}-dimensional"
+            )
+        self.periodicity = tuple(periodicity)
         self.mincoords = np.zeros(
             self.dimension
         )  # The smallest coordinate value in each of the dimensions. Used for periodicity checks.
@@ -580,14 +645,45 @@ class Lattice:
         Returns:
             _type_: the name of the closest unit cell
         """
+        if not self.unitcells:
+            raise ValueError("The lattice contains no unit cells")
+
+        pos = np.asarray(pos, dtype=float)
         mindist = np.inf
+        kucmin = None
         for kuc in self.unitcells:
-            vec = self.unitcells[kuc]["position"] - pos
+            vec = self.unitcells[kuc].position - pos
             dist2 = vec @ vec
             if dist2 < mindist:
                 mindist = dist2
                 kucmin = kuc
         return kucmin
+
+    def resolve_unit_cell(self, pos: Union[list, str], coordsys: str = "ij") -> str:
+        """Return the key of the unit cell designated by 'pos'.
+
+        Args:
+            pos (list or str): The position of the unit cell, either in the
+            lattice vector basis (coordsys = 'ij') or in cartesian coordinates
+            (coordsys = 'xy'). If cartesian is chosen, the unit cell returned is
+            the one whose center is closest to the position given. A unit cell
+            key such as '[0 1]' may also be passed directly, in which case
+            'coordsys' is ignored.
+            coordsys (str, optional): Either 'ij' or 'xy'. Defaults to "ij".
+
+        Returns:
+            str: The name of the designated unit cell.
+
+        Raises:
+            ValueError: If 'coordsys' is neither 'ij' nor 'xy'
+        """
+        if isinstance(pos, str):
+            return pos
+        if coordsys == "ij":
+            return arraytostring(np.array(pos))
+        if coordsys == "xy":
+            return self.find_closest_uc(pos)
+        raise ValueError(f"'coordsys' must be 'ij' or 'xy', got {coordsys!r}")
 
     def remove_unit_cell(self, pos: list, coordsys: str = "ij"):
         """Remove a unit cell from the lattice index. 'pos' specifies
@@ -597,84 +693,67 @@ class Lattice:
 
         Args:
             pos (list): The position of the unit cell to be removed
-            coordsys (str, optional): The coordinate system of position
+            coordsys (str, optional): The coordinate system of position.
             Either in lattice vector basis ('ij') or cartesian ('xy').
-            If cartesianchosen, the unit cell deletedthe one
-            whose centerclosest from the position given.
+            If cartesian is chosen, the unit cell deleted is the one
+            whose center is closest to the position given.
             Defaults to "ij".
         """
-
-        if coordsys == "ij":
-            self.unitcells.pop(arraytostring(np.array(pos)), None)
-        elif coordsys == "xy":
-            kucmin = self.find_closest_uc(pos)
-            self.unitcells.pop(kucmin, None)
+        self.unitcells.pop(self.resolve_unit_cell(pos, coordsys), None)
         self.define_index()
 
     def remove_site(self, pos: list, name: str, coordsys: str = "ij"):
-        """Remove a site for a unit cell in the lattice. 'pos' specifies
+        """Remove a site from a unit cell in the lattice. 'pos' specifies
         the position of the unit cell, either in the lattice vector basis
         (coordsys = 'ij') or in the cartesian basis
         (coordsys = 'xy').
 
+        If the site removed was the last one in its unit cell, the unit cell
+        is removed as well.
+
         Args:
             pos (list): The position of the unit cell.
             name (str): The name of the site to be removed.
-            coordsys (str, optional): The coordinate system of position
+            coordsys (str, optional): The coordinate system of position.
             Either in lattice vector basis ('ij') or cartesian ('xy').
-            If cartesianchosen, the unit cell deletedthe one
-            whose centerclosest from the position given.
+            If cartesian is chosen, the unit cell used is the one
+            whose center is closest to the position given.
             Defaults to "ij".
         """
-        pos = np.array(pos)
-        if coordsys == "ij":
-            uc = self.unitcells[arraytostring(np.array(pos))]
-            uc.sites.pop(name, None)
-            uc.define_index()
-            if (len(uc.sites)) == 0:
-                self.remove_unit_cell(pos)
-
-        elif coordsys == "xy":
-            kucmin = self.find_closest_uc(pos)
-            uc = self.unitcells[kucmin]
-            uc.sites.pop(name, None)
-            uc.define_index()
-            if len(uc.sites) == 0:
-                self.remove_unit_cell(pos)
-
+        kuc = self.resolve_unit_cell(pos, coordsys)
+        uc = self.unitcells[kuc]
+        uc.sites.pop(name, None)
+        uc.define_index()
+        if len(uc.sites) == 0:
+            # remove_unit_cell calls define_index for us
+            self.remove_unit_cell(kuc)
         self.define_index()
 
     def remove_orbital(
         self, pos: list, sitename: str, orbname: str, coordsys: str = "ij"
     ):
-        """Remove a orbital for a site of a unit cell in the lattice. 'pos' specifies
-        the position of the unit cell, either in the lattice vector basis
-        (coordsys = 'ij') or in the cartesian basis
-        (coordsys = 'xy').
+        """Remove an orbital from a site of a unit cell in the lattice. 'pos'
+        specifies the position of the unit cell, either in the lattice vector
+        basis (coordsys = 'ij') or in the cartesian basis (coordsys = 'xy').
+
+        If the orbital removed was the last one on its site, the site is
+        removed as well.
 
         Args:
             pos (list): The position of the unit cell.
             sitename (str): The name of the site.
             orbname (str): The name of the orbital to be removed.
-            coordsys (str, optional): The coordinate system of position
+            coordsys (str, optional): The coordinate system of position.
             Either in lattice vector basis ('ij') or cartesian ('xy').
-            If cartesianchosen, the unit cell deletedthe one
-            whose centerclosest from the position given.
+            If cartesian is chosen, the unit cell used is the one
+            whose center is closest to the position given.
             Defaults to "ij".
         """
-        pos = np.array(pos)
-        if coordsys == "ij":
-            uc = self.unitcells[arraytostring(pos)]
-            uc.remove_orbital(sitename, orbname)
-            if len(uc.sites[sitename].orbitals) == 0:
-                self.remove_site(np.array(pos), sitename)
-
-        elif coordsys == "xy":
-            kucmin = self.find_closest_uc(pos)
-            uc = self.unitcells[kucmin]
-            uc.remove_orbital(sitename, orbname)
-            if len(uc.sites[sitename].orbitals) == 0:
-                self.remove_site(np.array(pos), sitename)
+        kuc = self.resolve_unit_cell(pos, coordsys)
+        uc = self.unitcells[kuc]
+        uc.remove_orbital(sitename, orbname)
+        if len(uc.sites[sitename].orbitals) == 0:
+            self.remove_site(kuc, sitename)
         self.define_index()
 
     def define_index(self):
@@ -716,7 +795,13 @@ class Lattice:
                 "The number of arguments of the function do not match the dimensionality of the lattice"
             )
 
-        Eval = np.zeros(self.num_orbitals(), dtype=sig.return_annotation)
+        # Honour an explicit return annotation, otherwise let numpy infer the
+        # dtype from the values themselves (a lambda has no annotation).
+        dtype = sig.return_annotation
+        if dtype is inspect.Signature.empty:
+            dtype = None
+
+        Eval = np.zeros(self.num_orbitals(), dtype=object if dtype is None else dtype)
         for kuc, uc in self.unitcells.items():
             pos_uc = uc.position
             for ksite, site in uc.sites.items():
@@ -730,6 +815,9 @@ class Lattice:
                     for korb in orbitals:
                         indx = self.orbitals_index[f"{kuc}_{ksite}_{korb}"]
                         Eval[indx] = func(*pos)
+
+        if dtype is None:
+            Eval = np.asarray(Eval.tolist())
 
         return xr.DataArray(Eval, {"component": np.arange(self.num_orbitals())})
 
@@ -846,10 +934,6 @@ class Lattice:
                     textposition="bottom center",
                 )
             )
-            fig.update_yaxes(
-                scaleanchor="x",
-                scaleratio=1,
-            )
 
             fig.update_layout(
                 title=dict(text=f"{self.name} Lattice"),
@@ -935,26 +1019,7 @@ class Lattice:
         param_dims = [dim for dim in field.dims if dim != "component"]
 
         # Create sliders for each parameter dimension
-        sliders = {}
-        for dim in param_dims:
-            coord = field.coords[dim].values
-            val = coord[len(coord) // 2]  # start in the middle
-            if np.issubdtype(coord.dtype, np.floating):
-                sliders[dim] = FloatSlider(
-                    min=float(coord[0]),
-                    max=float(coord[-1]),
-                    step=float((coord[-1] - coord[0]) / max(100, len(coord))),
-                    value=float(val),
-                    description=dim,
-                )
-            else:
-                sliders[dim] = IntSlider(
-                    min=0,
-                    max=len(coord) - 1,
-                    step=1,
-                    value=len(coord) // 2,
-                    description=dim,
-                )
+        sliders = make_sliders(field, exclude=["component"])
 
         component_sel = {"component": index_orbselect}
         # Setup figure
@@ -986,6 +1051,7 @@ class Lattice:
             scatter = go.Scatter3d(
                 x=Xs,
                 y=Ys,
+                z=Zs,
                 mode="markers",
                 marker={
                     "size": 10,
@@ -1004,18 +1070,24 @@ class Lattice:
         # Initialize figure
         base_fig = go.FigureWidget(
             scatter
-        )  # FigureWidgeta permanent object that can be updated on the fly
-        base_fig.update_layout(
+        )  # FigureWidget is a permanent object that can be updated on the fly
+        layout = dict(
             title=dict(text=f"{self.name} Lattice"),
-            yaxis_zeroline=False,
-            xaxis_zeroline=False,
             paper_bgcolor="white",
             plot_bgcolor="white",
-            yaxis_scaleanchor="x",
             hovermode="closest",
             showlegend=False,
-            **figargs,
         )
+        if self.dimension == 2:
+            # The 2D axis options are meaningless for a 3D scene.
+            layout.update(
+                yaxis_zeroline=False,
+                xaxis_zeroline=False,
+                yaxis_scaleanchor="x",
+            )
+        else:
+            layout.update(scene_aspectmode="data")
+        base_fig.update_layout(**layout, **figargs)
 
         # Update callback
         def update(**kwargs):
@@ -1029,191 +1101,195 @@ class Lattice:
                 )
 
         interactive_output(update, sliders)
-        display(VBox([base_fig] + [HBox(list(sliders.values()))]))
+        layout_box = VBox([base_fig] + [HBox(list(sliders.values()))])
+        display(layout_box)
+        return layout_box
+
+    def split_orbital_key(self, key: str) -> tuple[str, str, str]:
+        """Split a lattice orbital key into its unit cell, site and orbital parts.
+
+        Keys have the form '<unitcell>_<site>_<orbital>'. A plain three-way
+        split on '_' breaks as soon as a site or orbital name contains an
+        underscore, so the site and orbital names are matched against the ones
+        actually present in the unit cell.
+
+        Args:
+            key (str): An entry of 'self.orbitals_index'
+
+        Returns:
+            tuple[str, str, str]: The unit cell, site and orbital names
+
+        Raises:
+            KeyError: If the key does not name an orbital of this lattice
+        """
+        kuc, rest = key.split("_", 1)
+        uc = self.unitcells[kuc]
+        for ksite, site in uc.sites.items():
+            prefix = f"{ksite}_"
+            if rest.startswith(prefix) and rest[len(prefix):] in site.orbitals:
+                return kuc, ksite, rest[len(prefix):]
+        raise KeyError(f"{key!r} does not name an orbital of lattice {self.name!r}")
+
+    def site_position(self, kuc: str, ksite: str) -> np.ndarray:
+        """Return the absolute cartesian position of a site in the lattice."""
+        return self.unitcells[kuc].position + self.unitcells[kuc].sites[ksite].position
+
+    def _coupling_links(self, Hamiltonian: xr.DataArray) -> dict:
+        """Group the non-zero off-diagonal Hamiltonian entries into site-to-site links.
+
+        Returns a dict keyed by site pair, holding the two endpoint positions and
+        the list of (orbital, orbital, matrix index) triples that contribute.
+        """
+        matrix = Hamiltonian
+        param_dims = [dim for dim in matrix.dims if dim not in ["i", "j"]]
+        if param_dims:
+            # A link is drawn if it is non-zero anywhere in parameter space, so
+            # that the set of traces stays fixed as the sliders move.
+            occupied = (matrix != 0).any(dim=param_dims).values
+        else:
+            occupied = (matrix != 0).values
+
+        rows, cols = np.nonzero(occupied)
+        links = {}
+        for i, j in zip(rows.tolist(), cols.tolist()):
+            if i == j:
+                continue
+            kuc1, ksite1, korb1 = self.split_orbital_key(self.reverse_orbital_index[i])
+            kuc2, ksite2, korb2 = self.split_orbital_key(self.reverse_orbital_index[j])
+            key = f"{kuc1}_{ksite1}_to_{kuc2}_{ksite2}"
+            if key not in links:
+                links[key] = {
+                    "positions": (
+                        self.site_position(kuc1, ksite1),
+                        self.site_position(kuc2, ksite2),
+                    ),
+                    "orbitals": [],
+                }
+            links[key]["orbitals"].append((korb1, korb2, i, j))
+        return links
+
+    @staticmethod
+    def _link_text(link: dict, amplitudes: np.ndarray) -> str:
+        """Build the hover label of one site-to-site link."""
+        return "<br> ".join(
+            f"{korb1} \u2194 {korb2} : {amplitudes[i, j].real:.2f} "
+            f"+ {amplitudes[i, j].imag:.2f}i"
+            for korb1, korb2, i, j in link["orbitals"]
+        )
 
     def plot_couplings(self, Hamiltonian: xr.DataArray, width=700, height=500):
         """
-        Creates an interactive Plotly figure where each link between orbitalsrepresented and can be hovered.
-        This function extracts the information directly from the Hamiltonian, so it can be used for troubleshooting
+        Creates an interactive Plotly figure where each link between orbitals is
+        represented and can be hovered. This function extracts the information
+        directly from the Hamiltonian, so it can be used for troubleshooting
         issues or forgotten couplings.
 
-        Hamiltonian: DataArray
-            The Hamiltonian of the system, each dimensions other than "i" and "j" will be converted as sliders for coupliong amplitude exploration.
+        Args:
+            Hamiltonian (xr.DataArray): The Hamiltonian of the system. Each dimension
+            other than "i" and "j" becomes a slider for coupling amplitude exploration.
+            width (int): Figure width in pixels.
+            height (int): Figure height in pixels.
+
+        Returns:
+            ipywidgets.VBox: The displayed figure and its sliders.
+
+        Raises:
+            ValueError: If the lattice is 1D or has more than 3 dimensions
+            NotImplementedError: If the lattice is 3D
         """
         if self.dimension == 1:
             raise ValueError("Do you really need me to plot a 1D lattice?")
-        elif self.dimension > 3:
+        if self.dimension > 3:
             raise ValueError(
                 "Too many dimensions for plotting, wait for me to get better at plotting stuff"
             )
-        elif self.dimension == 2:
-            self.create_site_dict()
-            Xs, Ys, Txt, Cols = [], [], [], []
-            # Computing the sites position and informations
-            for kuc, uc in self.unitcells.items():
-                pos_uc = self.unitcells[kuc].position
-                for ksite, site in uc.sites.items():
-                    Xs += [pos_uc[0] + site.position[0]]
-                    Ys += [pos_uc[1] + site.position[1]]
-                    Txt += [f"{kuc}, {ksite}"]
-                    Cols += [self.site_index[ksite]]
-
-            # Creating a dictionnary of all slider dimensions
-            param_dims = [dim for dim in Hamiltonian.dims if dim not in ["i", "j"]]
-
-            # Initializing sliders
-            sliders = {}
-            for dim in param_dims:
-                coord = Hamiltonian.coords[dim].values
-                val = coord[len(coord) // 2]  # start in the middle
-                if np.issubdtype(coord.dtype, np.floating):
-                    sliders[dim] = FloatSlider(
-                        min=float(coord[0]),
-                        max=float(coord[-1]),
-                        step=float((coord[-1] - coord[0]) / max(100, len(coord))),
-                        value=float(val),
-                        description=dim,
-                    )
-                else:
-                    sliders[dim] = IntSlider(
-                        min=0,
-                        max=len(coord) - 1,
-                        step=1,
-                        value=len(coord) // 2,
-                        description=dim,
-                    )
-
-            # Creating a dictionnary where each entry represents a specific site-to-site link containing all orbital-to-orbital coupling
-            initial_sel = {dim: sliders[dim].value for dim in param_dims}
-            AmpArray = Hamiltonian.sel(initial_sel, method="nearest")
-            linksdict = {}
-            for i in Hamiltonian.coords["i"].data:
-                for j, amp in enumerate(AmpArray.sel({"i": i}).data):
-                    if amp != 0 and i != j:
-                        kuc1, ksite1, korb1 = self.reverse_orbital_index[i].split("_")
-                        kuc2, ksite2, korb2 = self.reverse_orbital_index[j].split("_")
-                        key = f"{kuc1}_{ksite1}_to_{kuc2}_{ksite2}"
-
-                        pos1 = (
-                            self.unitcells[kuc1].position
-                            + self.unitcells[kuc1].sites[ksite1].position
-                        )
-                        pos2 = (
-                            self.unitcells[kuc2].position
-                            + self.unitcells[kuc2].sites[ksite2].position
-                        )
-
-                        if linksdict.get(key):
-                            linksdict[key][1] += (
-                                f"<br> {korb1} ↔ {korb2} : {amp.real:.2f} + {amp.imag:.2f}i"
-                            )
-                        else:
-                            linksdict[key] = [
-                                [pos1, pos2],
-                                f"{korb1} ↔ {korb2} : {amp.real:.2f} + {amp.imag:.2f}i",
-                            ]
-
-            # Base scatter for points
-            scatter = go.Scatter(
-                x=Xs,
-                y=Ys,
-                mode="markers",
-                marker=dict(size=10, color=Cols),
-                hoverinfo="text",
-                text=Txt,
-                name="Sites",
-                showlegend=False,
+        if self.dimension == 3:
+            raise NotImplementedError(
+                "plot_couplings currently supports 2D lattices only"
             )
 
-            # Build line segments for each link
-            edge_traces = []
-            for [pos1, pos2], info in linksdict.values():
-                edge_traces.append(
-                    go.Scatter(
-                        x=[pos1[0], (pos1[0] + pos2[0]) / 2, pos2[0]],
-                        y=[pos1[1], (pos1[1] + pos2[1]) / 2, pos2[1]],
-                        mode="lines",
-                        line=dict(width=4, color="rgba(100,100,100,0.3)"),
-                        name="link",
-                        hoverinfo="text",
-                        text=info,
-                        showlegend=False,
-                    )
-                )
+        self.create_site_dict()
+        Xs, Ys, Txt, Cols = [], [], [], []
+        # Computing the sites position and informations
+        for kuc, uc in self.unitcells.items():
+            pos_uc = uc.position
+            for ksite, site in uc.sites.items():
+                Xs += [pos_uc[0] + site.position[0]]
+                Ys += [pos_uc[1] + site.position[1]]
+                Txt += [f"{kuc}, {ksite}"]
+                Cols += [self.site_index[ksite]]
 
-            # Initial figure
-            base_fig = go.FigureWidget(
-                edge_traces + [scatter]
-            )  # FigureWidgeta permanent object that can be updated on the fly
-            base_fig.update_layout(
-                title=dict(text=f"{self.name} Lattice"),
-                xaxis=dict(constrain="domain"),
-                yaxis_scaleanchor="x",
-                paper_bgcolor="white",
-                plot_bgcolor="white",
-                hovermode="closest",
-                width=width,
-                height=height,
-                showlegend=False,
+        param_dims = [dim for dim in Hamiltonian.dims if dim not in ["i", "j"]]
+        sliders = make_sliders(Hamiltonian, exclude=["i", "j"])
+
+        # The set of links is fixed once, so trace indices stay valid as the
+        # sliders move; only the hover text is refreshed on update.
+        links = self._coupling_links(Hamiltonian)
+
+        initial_sel = {dim: sliders[dim].value for dim in param_dims}
+        amplitudes = Hamiltonian.sel(initial_sel, method="nearest").transpose("i", "j").values
+
+        # Base scatter for points
+        scatter = go.Scatter(
+            x=Xs,
+            y=Ys,
+            mode="markers",
+            marker=dict(size=10, color=Cols),
+            hoverinfo="text",
+            text=Txt,
+            name="Sites",
+            showlegend=False,
+        )
+
+        # Build line segments for each link
+        edge_traces = []
+        for link in links.values():
+            pos1, pos2 = link["positions"]
+            edge_traces.append(
+                go.Scatter(
+                    x=[pos1[0], (pos1[0] + pos2[0]) / 2, pos2[0]],
+                    y=[pos1[1], (pos1[1] + pos2[1]) / 2, pos2[1]],
+                    mode="lines",
+                    line=dict(width=4, color="rgba(100,100,100,0.3)"),
+                    name="link",
+                    hoverinfo="text",
+                    text=self._link_text(link, amplitudes),
+                    showlegend=False,
+                )
             )
-            
-            
 
-            # Update function, taking as argument the interactive objects (here sliders) and modifying the plot
-            def update(**kwargs):
-                fig = (
-                    base_fig  # accessing the semi-global base_fig and creating an alias
-                )
-                                
-                selection = {
-                    dim: kwargs[dim] for dim in param_dims
-                }  # creating a dict of dimension,value pairs which can be updated by the sliders
-                selected = Hamiltonian.sel(
-                    selection, method="nearest"
-                )  # Selecting the proper Hamiltonian slice
+        # Initial figure. FigureWidget is a permanent object that can be
+        # updated on the fly.
+        base_fig = go.FigureWidget(edge_traces + [scatter])
+        base_fig.update_layout(
+            title=dict(text=f"{self.name} Lattice"),
+            xaxis=dict(constrain="domain"),
+            yaxis_scaleanchor="x",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            hovermode="closest",
+            width=width,
+            height=height,
+            showlegend=False,
+        )
 
-                linksdict = {}
-                for i in Hamiltonian.coords["i"].data:
-                    for j, amp in enumerate(selected.sel({"i": i}).data):
-                        if i != j and amp != 0:
-                            kuc1, ksite1, korb1 = self.reverse_orbital_index[i].split(
-                                "_"
-                            )
-                            kuc2, ksite2, korb2 = self.reverse_orbital_index[j].split(
-                                "_"
-                            )
-                            key = f"{kuc1}_{ksite1}_to_{kuc2}_{ksite2}"
+        # Update function, taking the interactive objects (here sliders) as
+        # arguments and modifying the plot
+        def update(**kwargs):
+            selection = {dim: kwargs[dim] for dim in param_dims}
+            selected = (
+                Hamiltonian.sel(selection, method="nearest")
+                .transpose("i", "j")
+                .values
+            )
+            with base_fig.batch_update():
+                for index, link in enumerate(links.values()):
+                    base_fig.data[index].text = self._link_text(link, selected)
 
-                            pos1 = (
-                                self.unitcells[kuc1].position
-                                + self.unitcells[kuc1].sites[ksite1].position
-                            )
-                            pos2 = (
-                                self.unitcells[kuc2].position
-                                + self.unitcells[kuc2].sites[ksite2].position
-                            )
-
-                            if linksdict.get(key):
-                                linksdict[key][1] += (
-                                    f"<br> {korb1} ↔ {korb2} : {amp.real:.2f} + {amp.imag:.2f}i"
-                                )
-                            else:
-                                linksdict[key] = [
-                                    [pos1, pos2],
-                                    f"{korb1} ↔ {korb2} : {amp.real:.2f} + {amp.imag:.2f}i",
-                                ]
-                # Updating the FigureWidget using the with instruction
-                with fig.batch_update():
-                    for i, ([pos1, pos2], info) in enumerate(linksdict.values()):
-                        fig.data[
-                            i
-                        ].text = (
-                            info  # Updating the trace data[i] (link i) hoverable text
-                        )
-                        
-
-            interactive_output(update, sliders)
-            display(VBox([base_fig] + [HBox(list(sliders.values()))]))
+        interactive_output(update, sliders)
+        layout_box = VBox([base_fig] + [HBox(list(sliders.values()))])
+        display(layout_box)
+        return layout_box
 
 
 if __name__ == "__main__":
